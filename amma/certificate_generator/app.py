@@ -398,8 +398,6 @@ def main():
         st.session_state.template_doc = None
     if 'template_bytes' not in st.session_state:
         st.session_state.template_bytes = None
-    if 'detected_fields' not in st.session_state:
-        st.session_state.detected_fields = []
     if 'selected_fields' not in st.session_state:
         st.session_state.selected_fields = []
 
@@ -408,16 +406,18 @@ def main():
         st.header("Instructions")
         st.markdown("""
         1. **Upload Template**: Upload your Word document template
-        2. **Map Fields**: Select which fields contain serial numbers to increment
+        2. **Add Fields**: Enter the text patterns with serial numbers to increment
         3. **Configure**: Set the number of certificates to generate
         4. **Generate**: Download individual files or a combined document
         """)
 
-        st.header("Supported Patterns")
+        st.header("Example")
         st.markdown("""
-        - `C/KPCC/SE--/2526/014501`
-        - `1687/2526/1`
-        - Any numeric sequences
+        **Text to search:** `1687/2526/1`
+
+        **Numbers to increment:** `1` (only last number)
+
+        Or: `2526,1` (both numbers)
         """)
 
     # Step 1: Upload Template
@@ -436,120 +436,81 @@ def main():
             st.session_state.template_doc = Document(io.BytesIO(st.session_state.template_bytes))
             st.success(f"✅ Template loaded: {uploaded_file.name}")
 
-            # Detect serial fields
-            st.session_state.detected_fields = detect_serial_fields(st.session_state.template_doc)
-
         except Exception as e:
             st.error(f"Error loading document: {str(e)}")
             st.session_state.template_doc = None
 
     if st.session_state.template_doc is not None:
         # Step 2: Field Mapping
-        st.header("Step 2: Map Serial Number Fields")
+        st.header("Step 2: Add Custom Fields to Increment")
 
-        if not st.session_state.detected_fields:
-            st.warning("No potential serial number fields detected. Please check your document.")
-        else:
-            st.markdown("Select the fields that should be incremented for each certificate:")
+        # Initialize selected_fields
+        st.session_state.selected_fields = []
 
-            # Group fields by suggested and other
-            suggested = [f for f in st.session_state.detected_fields if f.get('suggested', False)]
-            others = [f for f in st.session_state.detected_fields if not f.get('suggested', False)]
+        st.markdown("Add the text patterns containing serial numbers that should be incremented. You can increment **multiple numbers** in the same text.")
 
-            selected_indices = []
+        with st.expander("Add custom field", expanded=True):
+            manual_search_text = st.text_input(
+                "Text to search for (e.g., '1687/2526/1')",
+                key="manual_search",
+                help="Enter the exact text pattern including the numbers that should increment"
+            )
+            manual_numbers = st.text_input(
+                "Numbers to increment (comma-separated, e.g., '2526,1')",
+                key="manual_numbers",
+                help="Enter the numeric parts that should increment, separated by commas. Each will increment by 1 for each certificate."
+            )
 
-            if suggested:
-                st.subheader("🎯 Suggested Fields (contain serial-related keywords)")
-                for idx, field in enumerate(suggested):
-                    col1, col2, col3 = st.columns([1, 3, 2])
-                    with col1:
-                        if st.checkbox("Select", key=f"suggested_{idx}", value=True):
-                            selected_indices.append(st.session_state.detected_fields.index(field))
-                    with col2:
-                        st.text(field['text'][:100] + "..." if len(field['text']) > 100 else field['text'])
-                    with col3:
-                        st.caption(f"Serial: **{field['pattern']['number']}** | {field['location']}")
+            if st.button("Add Field", key="add_manual"):
+                if manual_search_text and manual_numbers:
+                    # Parse comma-separated numbers
+                    numbers_list = [n.strip() for n in manual_numbers.split(',') if n.strip()]
 
-            if others:
-                st.subheader("📋 Other Detected Number Fields")
-                for idx, field in enumerate(others):
-                    col1, col2, col3 = st.columns([1, 3, 2])
-                    with col1:
-                        if st.checkbox("Select", key=f"other_{idx}", value=False):
-                            selected_indices.append(st.session_state.detected_fields.index(field))
-                    with col2:
-                        st.text(field['text'][:100] + "..." if len(field['text']) > 100 else field['text'])
-                    with col3:
-                        st.caption(f"Number: **{field['pattern']['number']}** | {field['location']}")
+                    # Validate all numbers are in the search text
+                    invalid_numbers = [n for n in numbers_list if n not in manual_search_text]
 
-            st.session_state.selected_fields = [st.session_state.detected_fields[i] for i in selected_indices]
-
-            # Manual field entry section
-            st.subheader("➕ Add Custom Field Manually")
-            st.markdown("If a serial number wasn't detected, you can add it manually. You can increment **multiple numbers** in the same text.")
-
-            with st.expander("Add manual field", expanded=False):
-                manual_search_text = st.text_input(
-                    "Text to search for (e.g., '1687/2526/1')",
-                    key="manual_search",
-                    help="Enter the exact text pattern including the numbers that should increment"
-                )
-                manual_numbers = st.text_input(
-                    "Numbers to increment (comma-separated, e.g., '2526,1')",
-                    key="manual_numbers",
-                    help="Enter the numeric parts that should increment, separated by commas. Each will increment by 1 for each certificate."
-                )
-
-                if st.button("Add Manual Field", key="add_manual"):
-                    if manual_search_text and manual_numbers:
-                        # Parse comma-separated numbers
-                        numbers_list = [n.strip() for n in manual_numbers.split(',') if n.strip()]
-
-                        # Validate all numbers are in the search text
-                        invalid_numbers = [n for n in numbers_list if n not in manual_search_text]
-
-                        if invalid_numbers:
-                            st.error(f"These numbers are not found in the search text: {', '.join(invalid_numbers)}")
-                        elif not numbers_list:
-                            st.error("Please enter at least one number to increment.")
-                        else:
-                            manual_field = {
-                                'type': 'manual',
-                                'text': f"Manual: {manual_search_text}",
-                                'location': "User-defined",
-                                'pattern': {
-                                    'full_match': manual_search_text,
-                                    'number': numbers_list[0],  # Primary number for compatibility
-                                    'numbers': numbers_list,  # All numbers to increment
-                                    'pattern_type': 'manual'
-                                },
-                                'suggested': False
-                            }
-                            if 'manual_fields' not in st.session_state:
-                                st.session_state.manual_fields = []
-                            st.session_state.manual_fields.append(manual_field)
-                            st.success(f"Added manual field: {manual_search_text} (incrementing: {', '.join(numbers_list)})")
-                            st.rerun()
+                    if invalid_numbers:
+                        st.error(f"These numbers are not found in the search text: {', '.join(invalid_numbers)}")
+                    elif not numbers_list:
+                        st.error("Please enter at least one number to increment.")
                     else:
-                        st.error("Please fill in both fields.")
+                        manual_field = {
+                            'type': 'manual',
+                            'text': f"Manual: {manual_search_text}",
+                            'location': "User-defined",
+                            'pattern': {
+                                'full_match': manual_search_text,
+                                'number': numbers_list[0],  # Primary number for compatibility
+                                'numbers': numbers_list,  # All numbers to increment
+                                'pattern_type': 'manual'
+                            },
+                            'suggested': False
+                        }
+                        if 'manual_fields' not in st.session_state:
+                            st.session_state.manual_fields = []
+                        st.session_state.manual_fields.append(manual_field)
+                        st.success(f"Added field: {manual_search_text} (incrementing: {', '.join(numbers_list)})")
+                        st.rerun()
+                else:
+                    st.error("Please fill in both fields.")
 
-            # Display and select manual fields
-            if 'manual_fields' in st.session_state and st.session_state.manual_fields:
-                st.subheader("✏️ Manual Fields")
-                for idx, field in enumerate(st.session_state.manual_fields):
-                    col1, col2, col3, col4 = st.columns([1, 3, 2, 1])
-                    with col1:
-                        if st.checkbox("Select", key=f"manual_{idx}", value=True):
-                            st.session_state.selected_fields.append(field)
-                    with col2:
-                        st.text(field['pattern']['full_match'])
-                    with col3:
-                        numbers = field['pattern'].get('numbers', [field['pattern']['number']])
-                        st.caption(f"Incrementing: **{', '.join(numbers)}**")
-                    with col4:
-                        if st.button("🗑️", key=f"delete_manual_{idx}"):
-                            st.session_state.manual_fields.pop(idx)
-                            st.rerun()
+        # Display and select custom fields
+        if 'manual_fields' in st.session_state and st.session_state.manual_fields:
+            st.subheader("Added Fields")
+            for idx, field in enumerate(st.session_state.manual_fields):
+                col1, col2, col3, col4 = st.columns([1, 3, 2, 1])
+                with col1:
+                    if st.checkbox("Select", key=f"manual_{idx}", value=True):
+                        st.session_state.selected_fields.append(field)
+                with col2:
+                    st.text(field['pattern']['full_match'])
+                with col3:
+                    numbers = field['pattern'].get('numbers', [field['pattern']['number']])
+                    st.caption(f"Incrementing: **{', '.join(numbers)}**")
+                with col4:
+                    if st.button("🗑️", key=f"delete_manual_{idx}"):
+                        st.session_state.manual_fields.pop(idx)
+                        st.rerun()
 
         # Step 3: Generation Settings
         st.header("Step 3: Configure Generation")
