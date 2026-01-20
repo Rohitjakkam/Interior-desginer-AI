@@ -1,16 +1,14 @@
- 
 import streamlit as st
 from PIL import Image
 import google.generativeai as genai
 import io
 import os
- 
+
 # ----------------------------
 # CONFIGURE GEMINI
 # ----------------------------
 genai.configure(api_key=st.secrets.get("GEMINI_API_KEY", ""))
 
- 
 text_model = genai.GenerativeModel("gemini-2.5-pro")
 image_model = genai.GenerativeModel("gemini-3-pro-image-preview")
  
@@ -310,7 +308,11 @@ Be specific and choose options that will work BEST together for this space.
                     st.rerun()
 
                 except Exception as e:
-                    st.error(f"Error getting AI suggestions: {str(e)}")
+                    error_msg = str(e)
+                    if "DeadlineExceeded" in error_msg or "504" in error_msg or "timeout" in error_msg.lower():
+                        st.error("⏱️ Request timed out. Please try again.")
+                    else:
+                        st.error(f"Error getting AI suggestions: {error_msg}")
 
         # Display AI suggestions if available
         if st.session_state.ai_suggestions:
@@ -356,13 +358,21 @@ Provide:
 8. FINAL photorealistic image generation prompt
 """
 
-        response = text_model.generate_content(
-            [analysis_prompt, st.session_state.image]
-        )
+        try:
+            response = text_model.generate_content(
+                [analysis_prompt, st.session_state.image]
+            )
 
-        st.session_state.design_text = response.text
+            st.session_state.design_text = response.text
+            st.success("✅ Design plan created!")
 
-    st.success("✅ Design plan created!")
+        except Exception as e:
+            error_msg = str(e)
+            if "DeadlineExceeded" in error_msg or "504" in error_msg or "timeout" in error_msg.lower():
+                st.error("⏱️ Request timed out creating design plan. Please try again.")
+            else:
+                st.error(f"❌ Error creating design plan: {error_msg}")
+            st.stop()
 
     # Step 2: Generate image
     with st.spinner("Step 2/2: Generating AI interior image..."):
@@ -394,28 +404,43 @@ ONLY CHANGE:
 Make it ultra-realistic, interior photography, natural lighting, professional quality.
 """
  
-        image_response = image_model.generate_content(
-            [st.session_state.image, image_prompt]
-        )
- 
-        for part in image_response.candidates[0].content.parts:
-            if part.inline_data:
-                image_bytes = part.inline_data.data
-                generated_image = Image.open(io.BytesIO(image_bytes))
- 
-                # FORCE SAME SIZE AS ORIGINAL
-                generated_image = generated_image.resize(
-                    st.session_state.image.size
-                )
+        try:
+            image_response = image_model.generate_content(
+                [st.session_state.image, image_prompt]
+            )
 
-                # Store generated image in session state
-                st.session_state.generated_image = generated_image
-                st.session_state.edit_history.append({
-                    "image": generated_image.copy(),
-                    "prompt": "Initial generation"
-                })
+            for part in image_response.candidates[0].content.parts:
+                if part.inline_data:
+                    image_bytes = part.inline_data.data
+                    generated_image = Image.open(io.BytesIO(image_bytes))
 
-    st.success("✅ Interior design generated successfully!")
+                    # FORCE SAME SIZE AS ORIGINAL
+                    generated_image = generated_image.resize(
+                        st.session_state.image.size
+                    )
+
+                    # Store generated image in session state
+                    st.session_state.generated_image = generated_image
+                    st.session_state.edit_history.append({
+                        "image": generated_image.copy(),
+                        "prompt": "Initial generation"
+                    })
+
+            st.success("✅ Interior design generated successfully!")
+
+        except Exception as e:
+            error_msg = str(e)
+            if "DeadlineExceeded" in error_msg or "504" in error_msg or "timeout" in error_msg.lower():
+                st.error("⏱️ Request timed out. The image generation took too long.")
+                st.warning("""
+                **Tips to avoid timeouts:**
+                - Try a smaller image
+                - Simplify your custom requirements
+                - Try again (server might be busy)
+                """)
+            else:
+                st.error(f"❌ Error generating image: {error_msg}")
+            st.stop()
 
     # Display the generated image
     st.subheader("Generated Interior Design")
@@ -487,11 +512,30 @@ if st.session_state.generated_image is not None:
     st.subheader("✏️ Refine Your Design")
     st.write("Not satisfied? Describe what you'd like to change:")
 
+    # Reference image upload (optional)
+    st.markdown("**📎 Reference Image (Optional)**")
+    st.caption("Upload a reference image if you want to add or replace an element with something specific (e.g., a specific table, sofa, or decor item).")
+
+    reference_file = st.file_uploader(
+        "Upload Reference Image",
+        type=["png", "jpg", "jpeg", "webp"],
+        help="Example: Upload an image of the table you want to add, or a style reference you want to copy",
+        key="refinement_reference_uploader"
+    )
+
+    reference_image = None
+    if reference_file is not None:
+        reference_image = Image.open(reference_file)
+        st.image(reference_image, caption="Reference Image", width=200)
+        st.success("✅ Reference image loaded! Mention it in your edit instructions below.")
+
+    st.markdown("---")
+
     # Text input for edit instructions
     edit_instruction = st.text_area(
         "Edit Instructions",
-        placeholder="Example: Make the sofa darker blue, add more plants, change curtains to white, make lighting warmer...",
-        help="Describe specific changes you want to make to the generated image"
+        placeholder="Example: Replace the center table with the one from the reference image, add more plants, change curtains to white...",
+        help="Describe specific changes you want to make. If you uploaded a reference image, mention how to use it."
     )
 
     col1, col2, col3 = st.columns([2, 2, 1])
@@ -500,6 +544,16 @@ if st.session_state.generated_image is not None:
         if st.button("🔄 Apply Changes", type="primary", disabled=not edit_instruction):
             with st.spinner("Applying your changes..."):
 
+                # Build reference image context if provided
+                reference_context = ""
+                if reference_image is not None:
+                    reference_context = """
+
+REFERENCE IMAGE PROVIDED:
+The user has uploaded a reference image showing an item/style they want to incorporate.
+Use this reference image to guide the modification - incorporate the referenced element/style as requested by the user.
+Match the style, color, and appearance of the reference while maintaining room coherence."""
+
                 refinement_prompt = f"""
 STRICT IMAGE REFINEMENT TASK.
 
@@ -507,21 +561,28 @@ Use the current generated interior design image as the BASE.
 
 USER REQUESTED CHANGES:
 {edit_instruction}
+{reference_context}
 
 ABSOLUTE RULES:
 - KEEP the overall room layout, size, and structure
 - KEEP the established interior style unless specifically asked to change
 - ONLY modify what the user specifically requested
 - Maintain consistency with unchanged elements
+- If a reference image is provided, incorporate its elements as specified by the user
 
 Apply the requested changes while keeping everything else consistent.
 Make it ultra-realistic, interior photography, natural lighting, professional quality.
 """
 
                 try:
-                    refinement_response = image_model.generate_content(
-                        [st.session_state.generated_image, refinement_prompt]
-                    )
+                    # Prepare content for generation
+                    generation_content = [st.session_state.generated_image, refinement_prompt]
+
+                    # Add reference image if provided
+                    if reference_image is not None:
+                        generation_content.append(reference_image)
+
+                    refinement_response = image_model.generate_content(generation_content)
 
                     for part in refinement_response.candidates[0].content.parts:
                         if part.inline_data:
@@ -537,14 +598,19 @@ Make it ultra-realistic, interior photography, natural lighting, professional qu
                             st.session_state.generated_image = refined_image
                             st.session_state.edit_history.append({
                                 "image": refined_image.copy(),
-                                "prompt": edit_instruction
+                                "prompt": edit_instruction,
+                                "has_reference": reference_image is not None
                             })
 
                             st.success("✅ Changes applied successfully!")
                             st.rerun()
 
                 except Exception as e:
-                    st.error(f"Error applying changes: {str(e)}")
+                    error_msg = str(e)
+                    if "DeadlineExceeded" in error_msg or "504" in error_msg or "timeout" in error_msg.lower():
+                        st.error("⏱️ Request timed out. Please try again with simpler changes.")
+                    else:
+                        st.error(f"Error applying changes: {error_msg}")
 
     with col2:
         if len(st.session_state.edit_history) > 1:
