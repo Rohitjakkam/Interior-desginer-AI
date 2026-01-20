@@ -243,43 +243,76 @@ def generate_certificate(template_bytes: bytes, field_mappings: List[Dict], incr
     remove_highlighting(new_doc)
 
     for mapping in field_mappings:
-        old_serial = mapping['pattern']['number']
-        new_serial = increment_serial(old_serial, increment)
         old_text = mapping['pattern']['full_match']
-        # Use replace_last_occurrence to handle cases like "1687/2526/1"
-        # where we want to replace only the last "1", not the "1" in "1687"
-        new_text = replace_last_occurrence(old_text, old_serial, new_serial)
 
-        if mapping['type'] == 'paragraph':
-            para_idx = mapping['para_idx']
-            if para_idx < len(new_doc.paragraphs):
-                replace_in_paragraph(new_doc.paragraphs[para_idx], old_text, new_text)
+        # Check if this is a manual field with multiple numbers
+        if mapping['type'] == 'manual' and 'numbers' in mapping['pattern']:
+            numbers_list = mapping['pattern']['numbers']
+            new_text = old_text
 
-        elif mapping['type'] == 'table_cell':
-            table_idx = mapping['table_idx']
-            row_idx = mapping['row_idx']
-            cell_idx = mapping['cell_idx']
+            # Replace each number from right to left (to handle overlapping positions)
+            # We process in reverse order of position in the string
+            number_positions = []
+            for num in numbers_list:
+                pos = new_text.rfind(num)
+                if pos != -1:
+                    number_positions.append((pos, num))
 
-            if table_idx < len(new_doc.tables):
-                table = new_doc.tables[table_idx]
-                if row_idx < len(table.rows):
-                    row = table.rows[row_idx]
-                    if cell_idx < len(row.cells):
-                        replace_in_table_cell(row.cells[cell_idx], old_text, new_text)
+            # Sort by position descending (right to left)
+            number_positions.sort(key=lambda x: x[0], reverse=True)
 
-        elif mapping['type'] == 'manual':
-            # For manual fields, search entire document
-            # Search in paragraphs
+            # Replace each number
+            for pos, num in number_positions:
+                new_num = increment_serial(num, increment)
+                new_text = new_text[:pos] + new_num + new_text[pos + len(num):]
+
+            # Search and replace in entire document
             for paragraph in new_doc.paragraphs:
                 if old_text in paragraph.text:
                     replace_in_paragraph(paragraph, old_text, new_text)
 
-            # Search in tables
             for table in new_doc.tables:
                 for row in table.rows:
                     for cell in row.cells:
                         if old_text in cell.text:
                             replace_in_table_cell(cell, old_text, new_text)
+
+        else:
+            # Standard single number replacement
+            old_serial = mapping['pattern']['number']
+            new_serial = increment_serial(old_serial, increment)
+            # Use replace_last_occurrence to handle cases like "1687/2526/1"
+            # where we want to replace only the last "1", not the "1" in "1687"
+            new_text = replace_last_occurrence(old_text, old_serial, new_serial)
+
+            if mapping['type'] == 'paragraph':
+                para_idx = mapping['para_idx']
+                if para_idx < len(new_doc.paragraphs):
+                    replace_in_paragraph(new_doc.paragraphs[para_idx], old_text, new_text)
+
+            elif mapping['type'] == 'table_cell':
+                table_idx = mapping['table_idx']
+                row_idx = mapping['row_idx']
+                cell_idx = mapping['cell_idx']
+
+                if table_idx < len(new_doc.tables):
+                    table = new_doc.tables[table_idx]
+                    if row_idx < len(table.rows):
+                        row = table.rows[row_idx]
+                        if cell_idx < len(row.cells):
+                            replace_in_table_cell(row.cells[cell_idx], old_text, new_text)
+
+            elif mapping['type'] == 'manual':
+                # For manual fields with single number, search entire document
+                for paragraph in new_doc.paragraphs:
+                    if old_text in paragraph.text:
+                        replace_in_paragraph(paragraph, old_text, new_text)
+
+                for table in new_doc.tables:
+                    for row in table.rows:
+                        for cell in row.cells:
+                            if old_text in cell.text:
+                                replace_in_table_cell(cell, old_text, new_text)
 
     return new_doc
 
@@ -453,31 +486,41 @@ def main():
 
             # Manual field entry section
             st.subheader("➕ Add Custom Field Manually")
-            st.markdown("If a serial number wasn't detected, you can add it manually by entering the exact text to find and replace.")
+            st.markdown("If a serial number wasn't detected, you can add it manually. You can increment **multiple numbers** in the same text.")
 
             with st.expander("Add manual field", expanded=False):
                 manual_search_text = st.text_input(
-                    "Text to search for (e.g., '/014501' or '1687/2526/1')",
+                    "Text to search for (e.g., '1687/2526/1')",
                     key="manual_search",
-                    help="Enter the exact text pattern including the number that should increment"
+                    help="Enter the exact text pattern including the numbers that should increment"
                 )
-                manual_number = st.text_input(
-                    "Number to increment (e.g., '014501' or '1')",
-                    key="manual_number",
-                    help="Enter just the numeric part that should increment"
+                manual_numbers = st.text_input(
+                    "Numbers to increment (comma-separated, e.g., '2526,1')",
+                    key="manual_numbers",
+                    help="Enter the numeric parts that should increment, separated by commas. Each will increment by 1 for each certificate."
                 )
 
                 if st.button("Add Manual Field", key="add_manual"):
-                    if manual_search_text and manual_number:
-                        # Validate that the number is in the search text
-                        if manual_number in manual_search_text:
+                    if manual_search_text and manual_numbers:
+                        # Parse comma-separated numbers
+                        numbers_list = [n.strip() for n in manual_numbers.split(',') if n.strip()]
+
+                        # Validate all numbers are in the search text
+                        invalid_numbers = [n for n in numbers_list if n not in manual_search_text]
+
+                        if invalid_numbers:
+                            st.error(f"These numbers are not found in the search text: {', '.join(invalid_numbers)}")
+                        elif not numbers_list:
+                            st.error("Please enter at least one number to increment.")
+                        else:
                             manual_field = {
                                 'type': 'manual',
                                 'text': f"Manual: {manual_search_text}",
                                 'location': "User-defined",
                                 'pattern': {
                                     'full_match': manual_search_text,
-                                    'number': manual_number,
+                                    'number': numbers_list[0],  # Primary number for compatibility
+                                    'numbers': numbers_list,  # All numbers to increment
                                     'pattern_type': 'manual'
                                 },
                                 'suggested': False
@@ -485,10 +528,8 @@ def main():
                             if 'manual_fields' not in st.session_state:
                                 st.session_state.manual_fields = []
                             st.session_state.manual_fields.append(manual_field)
-                            st.success(f"Added manual field: {manual_search_text}")
+                            st.success(f"Added manual field: {manual_search_text} (incrementing: {', '.join(numbers_list)})")
                             st.rerun()
-                        else:
-                            st.error("The number must be contained within the search text.")
                     else:
                         st.error("Please fill in both fields.")
 
@@ -503,7 +544,8 @@ def main():
                     with col2:
                         st.text(field['pattern']['full_match'])
                     with col3:
-                        st.caption(f"Number: **{field['pattern']['number']}**")
+                        numbers = field['pattern'].get('numbers', [field['pattern']['number']])
+                        st.caption(f"Incrementing: **{', '.join(numbers)}**")
                     with col4:
                         if st.button("🗑️", key=f"delete_manual_{idx}"):
                             st.session_state.manual_fields.pop(idx)
@@ -535,16 +577,42 @@ def main():
             st.subheader("Preview")
             st.markdown("**Selected fields will increment as follows:**")
 
+            def generate_preview_text(field, increment_val):
+                """Generate preview text for a field with given increment."""
+                full_match = field['pattern']['full_match']
+
+                # Check if multiple numbers
+                if 'numbers' in field['pattern']:
+                    numbers_list = field['pattern']['numbers']
+                    result = full_match
+
+                    # Get positions and replace from right to left
+                    number_positions = []
+                    for num in numbers_list:
+                        pos = result.rfind(num)
+                        if pos != -1:
+                            number_positions.append((pos, num))
+
+                    number_positions.sort(key=lambda x: x[0], reverse=True)
+
+                    for pos, num in number_positions:
+                        new_num = increment_serial(num, increment_val)
+                        result = result[:pos] + new_num + result[pos + len(num):]
+
+                    return result
+                else:
+                    serial = field['pattern']['number']
+                    return replace_last_occurrence(full_match, serial, increment_serial(serial, increment_val))
+
             preview_data = []
             for field in st.session_state.selected_fields:
-                serial = field['pattern']['number']
                 full_match = field['pattern']['full_match']
                 preview_data.append({
                     'Pattern': full_match,
-                    'Cert #1': replace_last_occurrence(full_match, serial, increment_serial(serial, 0)),
-                    'Cert #2': replace_last_occurrence(full_match, serial, increment_serial(serial, 1)),
-                    'Cert #3': replace_last_occurrence(full_match, serial, increment_serial(serial, 2)),
-                    f'Cert #{num_certificates}': replace_last_occurrence(full_match, serial, increment_serial(serial, num_certificates - 1))
+                    'Cert #1': generate_preview_text(field, 0),
+                    'Cert #2': generate_preview_text(field, 1),
+                    'Cert #3': generate_preview_text(field, 2),
+                    f'Cert #{num_certificates}': generate_preview_text(field, num_certificates - 1)
                 })
 
             st.table(preview_data)
