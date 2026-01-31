@@ -7,10 +7,70 @@ with automatic serial number incrementing.
 import streamlit as st
 import re
 import io
+import os
 import zipfile
+import tempfile
 from docx import Document
 from docx.shared import Pt
 from typing import List, Dict, Tuple, Optional
+
+
+def convert_doc_to_docx(doc_bytes: bytes) -> bytes:
+    """Convert .doc file to .docx format using Microsoft Word (Windows only).
+
+    Returns the .docx file as bytes.
+    """
+    try:
+        import win32com.client
+        import pythoncom
+
+        # Initialize COM for this thread
+        pythoncom.CoInitialize()
+
+        try:
+            # Create temporary files
+            with tempfile.NamedTemporaryFile(suffix='.doc', delete=False) as tmp_doc:
+                tmp_doc.write(doc_bytes)
+                tmp_doc_path = tmp_doc.name
+
+            tmp_docx_path = tmp_doc_path.replace('.doc', '.docx')
+
+            # Use Word to convert
+            word = win32com.client.Dispatch("Word.Application")
+            word.Visible = False
+
+            try:
+                doc = word.Documents.Open(tmp_doc_path)
+                # Save as .docx (format 16 = wdFormatDocumentDefault for .docx)
+                doc.SaveAs2(tmp_docx_path, FileFormat=16)
+                doc.Close()
+            finally:
+                word.Quit()
+
+            # Read the converted file
+            with open(tmp_docx_path, 'rb') as f:
+                docx_bytes = f.read()
+
+            # Clean up temp files
+            try:
+                os.unlink(tmp_doc_path)
+                os.unlink(tmp_docx_path)
+            except:
+                pass
+
+            return docx_bytes
+
+        finally:
+            pythoncom.CoUninitialize()
+
+    except ImportError:
+        raise Exception(
+            "To support .doc files, please install pywin32:\n"
+            "pip install pywin32\n\n"
+            "Note: This requires Microsoft Word to be installed on your computer."
+        )
+    except Exception as e:
+        raise Exception(f"Failed to convert .doc file: {str(e)}\n\nMake sure Microsoft Word is installed.")
 
 
 def extract_text_with_positions(doc: Document) -> List[Dict]:
@@ -325,6 +385,120 @@ def save_doc_to_bytes(doc: Document) -> bytes:
     return buffer.getvalue()
 
 
+def remove_blank_pages(doc: Document):
+    """Remove blank pages from the document.
+
+    This function removes:
+    - Empty paragraphs that only contain page breaks
+    - Paragraphs with only whitespace
+    - Consecutive empty paragraphs that create blank pages
+    """
+    from docx.oxml.ns import qn
+
+    body = doc.element.body
+    elements_to_remove = []
+
+    # Get all paragraph elements
+    paragraphs = body.findall(qn('w:p'))
+
+    for i, para in enumerate(paragraphs):
+        # Check if paragraph is empty or only has formatting
+        text_content = ''.join(para.itertext()).strip()
+
+        # Check if it has a page break but no real content
+        has_page_break = False
+        has_content = bool(text_content)
+
+        # Check for page break elements
+        for br in para.iter(qn('w:br')):
+            br_type = br.get(qn('w:type'))
+            if br_type == 'page':
+                has_page_break = True
+
+        # Check for pageBreakBefore in paragraph properties
+        pPr = para.find(qn('w:pPr'))
+        if pPr is not None:
+            pb_before = pPr.find(qn('w:pageBreakBefore'))
+            if pb_before is not None:
+                has_page_break = True
+
+        # If paragraph has page break but no content, and is followed by another
+        # element with page break, mark for removal
+        if has_page_break and not has_content:
+            # Check if next paragraph also starts with page break
+            if i + 1 < len(paragraphs):
+                next_para = paragraphs[i + 1]
+                next_pPr = next_para.find(qn('w:pPr'))
+                if next_pPr is not None:
+                    next_pb = next_pPr.find(qn('w:pageBreakBefore'))
+                    if next_pb is not None:
+                        # This empty page break paragraph creates a blank page
+                        elements_to_remove.append(para)
+                        continue
+
+        # Remove completely empty paragraphs (no text, no images, no tables)
+        if not has_content and not has_page_break:
+            # Check if it has any runs with content
+            runs = para.findall(qn('w:r'))
+            has_any_content = False
+            for run in runs:
+                # Check for drawings/images
+                if run.find(qn('w:drawing')) is not None:
+                    has_any_content = True
+                    break
+                # Check for any text
+                for t in run.iter(qn('w:t')):
+                    if t.text and t.text.strip():
+                        has_any_content = True
+                        break
+
+            # If truly empty, check if it's creating a blank page
+            if not has_any_content:
+                # Check previous element for page break
+                prev_idx = list(body).index(para) - 1
+                if prev_idx >= 0:
+                    prev_elem = list(body)[prev_idx]
+                    if prev_elem.tag.endswith('}p'):
+                        prev_text = ''.join(prev_elem.itertext()).strip()
+                        if not prev_text:
+                            # Two consecutive empty paragraphs - remove one
+                            elements_to_remove.append(para)
+
+    # Remove marked elements
+    for elem in elements_to_remove:
+        try:
+            body.remove(elem)
+        except ValueError:
+            pass  # Element already removed
+
+    # Second pass: remove standalone empty page break paragraphs at problematic positions
+    paragraphs = body.findall(qn('w:p'))
+    for para in paragraphs:
+        text_content = ''.join(para.itertext()).strip()
+        if not text_content:
+            # Check if this paragraph only has a page break and nothing else useful
+            runs = para.findall(qn('w:r'))
+            only_has_break = False
+
+            for run in runs:
+                br_elements = run.findall(qn('w:br'))
+                for br in br_elements:
+                    if br.get(qn('w:type')) == 'page':
+                        only_has_break = True
+
+                # If run has other content, don't remove
+                if run.find(qn('w:drawing')) is not None:
+                    only_has_break = False
+                    break
+
+            if only_has_break and len(runs) <= 1:
+                # This is likely causing a blank page
+                try:
+                    body.remove(para)
+                except ValueError:
+                    pass
+
+
 def create_combined_document(template_bytes: bytes, field_mappings: List[Dict], count: int) -> bytes:
     """Create a single document with all certificates separated by page breaks.
 
@@ -380,6 +554,9 @@ def create_combined_document(template_bytes: bytes, field_mappings: List[Dict], 
             for element in elements_to_copy:
                 combined_doc.element.body.append(element)
 
+    # Remove any blank pages that may have been created
+    remove_blank_pages(combined_doc)
+
     return save_doc_to_bytes(combined_doc)
 
 
@@ -405,7 +582,7 @@ def main():
     with st.sidebar:
         st.header("Instructions")
         st.markdown("""
-        1. **Upload Template**: Upload your Word document template
+        1. **Upload Template**: Upload your Word document (.doc or .docx)
         2. **Add Fields**: Enter the text patterns with serial numbers to increment
         3. **Configure**: Set the number of certificates to generate
         4. **Generate**: Download individual files or a combined document
@@ -420,19 +597,37 @@ def main():
         Or: `2526,1` (both numbers)
         """)
 
+        st.header("Supported Formats")
+        st.markdown("""
+        - `.docx` (Word 2007+)
+        - `.doc` (Legacy Word) *
+
+        *Requires MS Word installed
+        """)
+
     # Step 1: Upload Template
     st.header("Step 1: Upload Template")
 
     uploaded_file = st.file_uploader(
-        "Upload your Word document template (.docx)",
-        type=['docx'],
-        help="Upload a Word document that will serve as your certificate template"
+        "Upload your Word document template (.doc or .docx)",
+        type=['docx', 'doc'],
+        help="Upload a Word document that will serve as your certificate template. Both .doc and .docx formats are supported."
     )
 
     if uploaded_file is not None:
         # Load document
         try:
-            st.session_state.template_bytes = uploaded_file.getvalue()
+            file_bytes = uploaded_file.getvalue()
+            filename = uploaded_file.name.lower()
+
+            # Check if it's a .doc file and convert it
+            if filename.endswith('.doc') and not filename.endswith('.docx'):
+                with st.spinner("Converting .doc to .docx format..."):
+                    st.session_state.template_bytes = convert_doc_to_docx(file_bytes)
+                st.info("📄 Converted .doc file to .docx format")
+            else:
+                st.session_state.template_bytes = file_bytes
+
             st.session_state.template_doc = Document(io.BytesIO(st.session_state.template_bytes))
             st.success(f"✅ Template loaded: {uploaded_file.name}")
 
