@@ -15,6 +15,19 @@ from docx.shared import Pt
 from typing import List, Dict, Tuple, Optional
 
 
+def is_doc_support_available() -> bool:
+    """Check if .doc file support is available (Windows with pywin32 only)."""
+    try:
+        import win32com.client
+        import pythoncom
+        return True
+    except ImportError:
+        return False
+
+
+DOC_SUPPORT_AVAILABLE = is_doc_support_available()
+
+
 def convert_doc_to_docx(doc_bytes: bytes) -> bytes:
     """Convert .doc file to .docx format using Microsoft Word (Windows only).
 
@@ -581,8 +594,9 @@ def main():
     # Sidebar for instructions
     with st.sidebar:
         st.header("Instructions")
-        st.markdown("""
-        1. **Upload Template**: Upload your Word document (.doc or .docx)
+        doc_formats = ".doc or .docx" if DOC_SUPPORT_AVAILABLE else ".docx"
+        st.markdown(f"""
+        1. **Upload Template**: Upload your Word document ({doc_formats})
         2. **Add Fields**: Enter the text patterns with serial numbers to increment
         3. **Configure**: Set the number of certificates to generate
         4. **Generate**: Download individual files or a combined document
@@ -598,21 +612,34 @@ def main():
         """)
 
         st.header("Supported Formats")
-        st.markdown("""
-        - `.docx` (Word 2007+)
-        - `.doc` (Legacy Word) *
+        if DOC_SUPPORT_AVAILABLE:
+            st.markdown("""
+            - `.docx` (Word 2007+)
+            - `.doc` (Legacy Word)
+            """)
+        else:
+            st.markdown("""
+            - `.docx` (Word 2007+)
 
-        *Requires MS Word installed
-        """)
+            *.doc support requires Windows + MS Word*
+            """)
 
     # Step 1: Upload Template
     st.header("Step 1: Upload Template")
 
-    uploaded_file = st.file_uploader(
-        "Upload your Word document template (.doc or .docx)",
-        type=['docx', 'doc'],
-        help="Upload a Word document that will serve as your certificate template. Both .doc and .docx formats are supported."
-    )
+    # Conditionally support .doc files based on platform
+    if DOC_SUPPORT_AVAILABLE:
+        uploaded_file = st.file_uploader(
+            "Upload your Word document template (.doc or .docx)",
+            type=['docx', 'doc'],
+            help="Upload a Word document that will serve as your certificate template. Both .doc and .docx formats are supported."
+        )
+    else:
+        uploaded_file = st.file_uploader(
+            "Upload your Word document template (.docx)",
+            type=['docx'],
+            help="Upload a Word document (.docx) that will serve as your certificate template."
+        )
 
     if uploaded_file is not None:
         # Load document
@@ -620,8 +647,8 @@ def main():
             file_bytes = uploaded_file.getvalue()
             filename = uploaded_file.name.lower()
 
-            # Check if it's a .doc file and convert it
-            if filename.endswith('.doc') and not filename.endswith('.docx'):
+            # Check if it's a .doc file and convert it (only on Windows with pywin32)
+            if DOC_SUPPORT_AVAILABLE and filename.endswith('.doc') and not filename.endswith('.docx'):
                 with st.spinner("Converting .doc to .docx format..."):
                     st.session_state.template_bytes = convert_doc_to_docx(file_bytes)
                 st.info("📄 Converted .doc file to .docx format")
