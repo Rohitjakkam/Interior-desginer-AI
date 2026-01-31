@@ -515,8 +515,8 @@ def remove_blank_pages(doc: Document):
 def create_combined_document(template_bytes: bytes, field_mappings: List[Dict], count: int) -> bytes:
     """Create a single document with all certificates separated by page breaks.
 
-    This function properly preserves the template formatting by copying XML elements
-    from each generated certificate into a combined document.
+    This uses a simpler approach: add a hard page break at the END of each certificate
+    (except the last one) to avoid blank page issues with footers.
     """
     from docx.oxml.ns import qn
     from docx.oxml import OxmlElement
@@ -527,48 +527,38 @@ def create_combined_document(template_bytes: bytes, field_mappings: List[Dict], 
 
     # For remaining certificates, append with page breaks
     for i in range(1, count):
-        # Generate each certificate from template
+        # Add a page break at the end of the current content (before adding next certificate)
+        # Find the last paragraph in the combined doc
+        body = combined_doc.element.body
+        paragraphs = body.findall(qn('w:p'))
+
+        if paragraphs:
+            # Add page break run to the last paragraph
+            last_para = paragraphs[-1]
+
+            # Create a run with a page break
+            run = OxmlElement('w:r')
+            br = OxmlElement('w:br')
+            br.set(qn('w:type'), 'page')
+            run.append(br)
+            last_para.append(run)
+        else:
+            # No paragraphs, create one with a page break
+            page_break_para = OxmlElement('w:p')
+            run = OxmlElement('w:r')
+            br = OxmlElement('w:br')
+            br.set(qn('w:type'), 'page')
+            run.append(br)
+            page_break_para.append(run)
+            body.append(page_break_para)
+
+        # Generate the next certificate
         cert_doc = generate_certificate(template_bytes, field_mappings, i)
 
         # Get all body elements from cert_doc (excluding sectPr)
-        elements_to_copy = []
         for element in cert_doc.element.body:
             if not element.tag.endswith('sectPr'):
-                elements_to_copy.append(deepcopy(element))
-
-        if elements_to_copy:
-            # Add page break to the first element of this certificate
-            first_element = elements_to_copy[0]
-
-            # Check if it's a paragraph (w:p) - add page break before
-            if first_element.tag.endswith('}p'):
-                # Find or create pPr (paragraph properties)
-                pPr = first_element.find(qn('w:pPr'))
-                if pPr is None:
-                    pPr = OxmlElement('w:pPr')
-                    first_element.insert(0, pPr)
-
-                # Add page break before this paragraph
-                pageBreakBefore = OxmlElement('w:pageBreakBefore')
-                pageBreakBefore.set(qn('w:val'), 'true')
-                pPr.append(pageBreakBefore)
-
-            elif first_element.tag.endswith('}tbl'):
-                # For tables, insert a page break paragraph before the table
-                page_break_para = OxmlElement('w:p')
-                pPr = OxmlElement('w:pPr')
-                pageBreakBefore = OxmlElement('w:pageBreakBefore')
-                pageBreakBefore.set(qn('w:val'), 'true')
-                pPr.append(pageBreakBefore)
-                page_break_para.append(pPr)
-                combined_doc.element.body.append(page_break_para)
-
-            # Append all elements
-            for element in elements_to_copy:
-                combined_doc.element.body.append(element)
-
-    # Remove any blank pages that may have been created
-    remove_blank_pages(combined_doc)
+                combined_doc.element.body.append(deepcopy(element))
 
     return save_doc_to_bytes(combined_doc)
 
