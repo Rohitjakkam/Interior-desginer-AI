@@ -19,12 +19,24 @@ def resize_to_webp(image: Image.Image, target_width: int) -> bytes:
     return buf.getvalue()
 
 
-def build_zip(variants: dict[int, bytes], stem: str) -> bytes:
-    """Pack all WebP variants into a ZIP archive."""
+def generate_variants(image: Image.Image) -> dict[int, bytes]:
+    """Generate WebP variants for all target widths."""
+    variants: dict[int, bytes] = {}
+    for w in WIDTHS:
+        if w <= image.width:
+            variants[w] = resize_to_webp(image, w)
+        else:
+            variants[w] = resize_to_webp(image, image.width)
+    return variants
+
+
+def build_batch_zip(all_variants: dict[str, dict[int, bytes]]) -> bytes:
+    """Pack all images into a ZIP with a folder per image."""
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
-        for width, data in variants.items():
-            zf.writestr(f"{stem}-{width}.webp", data)
+        for stem, variants in all_variants.items():
+            for width, data in variants.items():
+                zf.writestr(f"{stem}/{stem}-{width}.webp", data)
     return buf.getvalue()
 
 
@@ -49,54 +61,84 @@ def html_snippet(stem: str) -> str:
 st.set_page_config(page_title="Squish", page_icon="🫠", layout="wide")
 
 st.title("🫠 Squish")
-st.caption("Upload one image → get 3 responsive WebP variants + HTML snippet")
+st.caption("Upload images → get 3 responsive WebP variants per image + HTML snippets")
 
-uploaded = st.file_uploader(
-    "Drop an image here",
+uploaded_files = st.file_uploader(
+    "Drop your images here",
     type=["png", "jpg", "jpeg", "webp"],
+    accept_multiple_files=True,
 )
 
-if uploaded:
-    image = Image.open(uploaded).convert("RGB")
-    stem = Path(uploaded.name).stem
+if uploaded_files:
+    # Build a cache key from filenames + sizes to detect new uploads
+    cache_key = tuple((f.name, f.size) for f in uploaded_files)
 
-    st.subheader("Original")
-    col_orig, col_info = st.columns([2, 1])
-    with col_orig:
-        st.image(image, use_column_width=True)
-    with col_info:
-        st.metric("Dimensions", f"{image.width} × {image.height}")
-        st.metric("Upload size", f"{uploaded.size / 1024:.1f} KB")
+    # Only reprocess if uploads changed
+    if st.session_state.get("cache_key") != cache_key:
+        all_variants: dict[str, dict[int, bytes]] = {}
+        total_original = 0
+        total_compressed = 0
+
+        progress = st.progress(0, text="Processing images...")
+
+        for i, uploaded in enumerate(uploaded_files):
+            image = Image.open(uploaded).convert("RGB")
+            stem = Path(uploaded.name).stem
+
+            if stem in all_variants:
+                stem = f"{stem}_{i}"
+
+            variants = generate_variants(image)
+            all_variants[stem] = variants
+
+            total_original += uploaded.size
+            total_compressed += sum(len(d) for d in variants.values())
+
+            progress.progress((i + 1) / len(uploaded_files), text=f"Processing {i + 1}/{len(uploaded_files)}...")
+
+        progress.empty()
+
+        # Cache results in session state
+        st.session_state["cache_key"] = cache_key
+        st.session_state["all_variants"] = all_variants
+        st.session_state["total_original"] = total_original
+        st.session_state["total_compressed"] = total_compressed
+        st.session_state["zip_bytes"] = build_batch_zip(all_variants)
+
+    # Read from cache
+    all_variants = st.session_state["all_variants"]
+    total_original = st.session_state["total_original"]
+    total_compressed = st.session_state["total_compressed"]
+    zip_bytes = st.session_state["zip_bytes"]
+
+    st.success(f"Done! Processed **{len(uploaded_files)}** images")
+
+    # ── Stats ──
+    col1, col2, col3 = st.columns(3)
+    col1.metric("Images", len(uploaded_files))
+    col2.metric("Original total", f"{total_original / 1024:.1f} KB")
+    col3.metric("Compressed total", f"{total_compressed / 1024:.1f} KB")
 
     st.divider()
-    st.subheader("Generated variants")
 
-    # Generate variants (skip widths larger than original)
-    variants: dict[int, bytes] = {}
-    for w in WIDTHS:
-        if w <= image.width:
-            variants[w] = resize_to_webp(image, w)
-        else:
-            variants[w] = resize_to_webp(image, image.width)
-
-    cols = st.columns(len(WIDTHS))
-    for col, width in zip(cols, WIDTHS):
-        data = variants[width]
-        with col:
-            st.image(data, caption=f"{width}w", use_column_width=True)
-            st.caption(f"{len(data) / 1024:.1f} KB")
-
-    st.divider()
-
-    # Download ZIP
-    zip_bytes = build_zip(variants, stem)
+    # ── Download ZIP ──
     st.download_button(
-        "⬇️  Download all as ZIP",
+        f"⬇️  Download all ({len(uploaded_files)} images × 3 sizes) as ZIP",
         data=zip_bytes,
-        file_name=f"{stem}-responsive.zip",
+        file_name="squish-responsive.zip",
         mime="application/zip",
     )
 
-    # HTML snippet
-    st.subheader("HTML snippet")
-    st.code(html_snippet(stem), language="html")
+    st.divider()
+
+    # ── Preview each image ──
+    for stem, variants in all_variants.items():
+        with st.expander(f"📁 {stem}", expanded=False):
+            cols = st.columns(len(WIDTHS))
+            for col, width in zip(cols, WIDTHS):
+                data = variants[width]
+                with col:
+                    st.image(data, caption=f"{width}w", use_column_width=True)
+                    st.caption(f"{len(data) / 1024:.1f} KB")
+
+            st.code(html_snippet(stem), language="html")
