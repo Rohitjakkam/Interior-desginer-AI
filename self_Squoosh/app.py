@@ -46,9 +46,9 @@ def html_snippet(stem: str) -> str:
 
 # ── UI ────────────────────────────────────────────────────────────────
 
-st.set_page_config(page_title="Self Squoosh", page_icon="🖼️", layout="wide")
+st.set_page_config(page_title="Squish", page_icon="🫠", layout="wide")
 
-st.title("🖼️ Self Squoosh")
+st.title("🫠 Squish")
 st.caption("Upload one image → get 3 responsive WebP variants + HTML snippet")
 
 uploaded = st.file_uploader(
